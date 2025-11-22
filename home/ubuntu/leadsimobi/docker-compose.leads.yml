@@ -1,0 +1,158 @@
+services:
+  # PostgreSQL Database - Porta 5433 para evitar conflito
+  postgres:
+    image: postgres:15-alpine
+    container_name: leadsimobi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-leadsimobi}
+      POSTGRES_USER: ${POSTGRES_USER:-leadsimobi_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - leadsimobi_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  # Porta externa 5433 para evitar conflito
+    networks:
+      - leadsimobi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-leadsimobi_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis - Porta 6380 para evitar conflito
+  redis:
+    image: redis:7-alpine
+    container_name: leadsimobi-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"  # Porta externa 6380
+    volumes:
+      - leadsimobi_redis_data:/data
+    networks:
+      - leadsimobi-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Evolution API v2 - Porta 8081 para evitar conflito
+  evolution-api:
+    image: atendai/evolution-api:latest
+    container_name: leadsimobi-evolution-api
+    restart: unless-stopped
+    environment:
+      SERVER_URL: ${EVOLUTION_API_URL:-http://localhost:8081}
+      PORT: 8080
+      DATABASE_ENABLED: true
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-leadsimobi_user}:${POSTGRES_PASSWORD}@postgres:5432/evolution_api_db
+      CONFIG_SESSION_TOKEN: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: true
+      # Desabilitar migração automática (banco já tem schema)
+      SKIP_DB_MIGRATIONS: "true"
+      PRISMA_SKIP_MIGRATIONS: "true"
+    ports:
+      - "8081:8080"  # Porta externa 8081
+    volumes:
+      - leadsimobi_evolution_data:/evolution/instances
+      - leadsimobi_evolution_store:/evolution/store
+    networks:
+      - leadsimobi-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # n8n - Porta 5679 para evitar conflito
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: leadsimobi-n8n
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=${N8N_HOST:-0.0.0.0}
+      - N8N_PORT=${N8N_PORT:-5678}
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE:-true}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-leadsimobi}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-leadsimobi_user}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+    ports:
+      - "5679:5678"  # Porta externa 5679
+    volumes:
+      - leadsimobi_n8n_data:/home/node/.n8n
+    networks:
+      - leadsimobi-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend Next.js - Porta 3001 para evitar conflito
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    container_name: leadsimobi-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - NEXT_PUBLIC_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
+      - NEXT_PUBLIC_N8N_URL=http://localhost:5679
+      - DATABASE_URL=${DATABASE_URL}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-leadsimobi}
+      - POSTGRES_USER=${POSTGRES_USER:-leadsimobi_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_API_URL=http://evolution-api:8080
+    ports:
+      - "3001:3000"  # Porta externa 3001
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - leadsimobi-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution-api:
+        condition: service_healthy
+    command: npm run dev
+
+networks:
+  leadsimobi-network:
+    name: leadsimobi-network
+    driver: bridge
+
+volumes:
+  leadsimobi_postgres_data:
+    name: leadsimobi_postgres_data
+  leadsimobi_redis_data:
+    name: leadsimobi_redis_data
+  leadsimobi_evolution_data:
+    name: leadsimobi_evolution_data
+  leadsimobi_evolution_store:
+    name: leadsimobi_evolution_store
+  leadsimobi_n8n_data:
+    name: leadsimobi_n8n_data
+
